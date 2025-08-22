@@ -1,17 +1,19 @@
-import os
-import json
 import argparse
-import numpy as np
-import torch
+import json
+import logging
+import shutil
+import os
+
 import cma
 import datasets
-import shutil
+import numpy as np
+import torch
 from typing import List, Dict, Tuple
 from vllm import LLM, SamplingParams
 from vllm.lora.request import LoRARequest
-from reward import format_reward_func, equation_reward_func
 from tqdm import tqdm
-import logging
+
+from reward import format_reward_func, equation_reward_func
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -118,8 +120,8 @@ class LoRAWeightManager:
         save_file(weights_dict, os.path.join(save_path, "adapter_model.safetensors"))
 
 
-class CMAESTrainer:
-    """CMA-ES trainer for LoRA optimization with vLLM"""
+class LMMAESTrainer:
+    """LM-MA-ES trainer for LoRA optimization with vLLM"""
 
     def __init__(
         self,
@@ -179,16 +181,18 @@ class CMAESTrainer:
             stop=["</answer>"],
         )
 
-        # Initialize CMA-ES
+        # Initialize LM-MA-ES
         initial_weights = self.lora_manager.init_weights()
-        self.es = cma.CMAEvolutionStrategy(
+        # Use LM-MA-ES for better performance on high-dimensional problems
+        self.es = cma.purecma.CMAES(
             initial_weights,
             self.sigma,
-            {
+            inopts={
                 'popsize': self.population_size,
                 'seed': self.seed,
-                'maxiter': self.max_generations,
-                'verb_disp': 1,
+                'bounds': [-5, 5],  # Bounded optimization for stability
+                'CMA_memory_const': 0.7,  # Limited memory constant (0.7 is good for high-dim)
+                'verb_disp': 100,
                 'verb_log': 1,
             }
         )
@@ -258,11 +262,11 @@ class CMAESTrainer:
 
     def train(self):
         """Main training loop"""
-        logger.info("Starting CMA-ES training")
+        logger.info("Starting LM-MA-ES training")
 
         for generation in range(self.max_generations):
-            if self.es.stop():
-                logger.info("CMA-ES converged")
+            if generation >= self.max_generations:
+                logger.info("Reached maximum generations")
                 break
 
             # Sample population
@@ -272,10 +276,10 @@ class CMAESTrainer:
             logger.info(f"Generation {generation + 1}/{self.max_generations}")
             rewards = self.evaluate_population(population)
 
-            # Negate rewards for minimization (CMA-ES minimizes by default)
+            # Negate rewards for minimization (LM-MA-ES minimizes by default)
             costs = [-r for r in rewards]
 
-            # Update CMA-ES
+            # Update LM-MA-ES
             self.es.tell(population, costs)
 
             # Track best solution
@@ -373,7 +377,7 @@ class CMAESTrainer:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="CMA-ES training for LoRA optimization with vLLM")
+    parser = argparse.ArgumentParser(description="LM-MA-ES training for LoRA optimization with vLLM")
     parser.add_argument("--model_name", type=str, default="Qwen/Qwen2.5-3B-Instruct-GPTQ-Int4",
                        help="Model name or path")
     parser.add_argument("--dataset_path", type=str, default="countdown_dataset",
@@ -400,7 +404,7 @@ def main():
     args = parser.parse_args()
 
     # Create trainer and start training
-    trainer = CMAESTrainer(
+    trainer = LMMAESTrainer(
         model_name=args.model_name,
         dataset_path=args.dataset_path,
         population_size=args.population_size,
