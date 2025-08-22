@@ -131,20 +131,34 @@ class GRPOTrainer:
         return torch.tensor(combined_rewards, dtype=torch.float32)
 
     def get_log_probs(self, model, prompts: List[str], completions: List[str], requires_grad: bool = False) -> torch.Tensor:
-        """Calculate actual log probabilities for completions given prompts"""
+        """Calculate actual log probabilities for completions given prompts - batched version"""
+        device = next(model.parameters()).device
         log_probs = []
+        
+        # Process in batches for efficiency using the configured batch_size
+        for i in range(0, len(prompts), self.batch_size):
+            batch_prompts = prompts[i:i+self.batch_size]
+            batch_completions = completions[i:i+self.batch_size]
+            
+            # Tokenize all prompts and full texts in batch
+            prompt_tokens = self.tokenizer(
+                batch_prompts, 
+                return_tensors="pt", 
+                padding=True,
+                truncation=True, 
+                max_length=256
+            ).to(device)
+            
+            full_texts = [p + c for p, c in zip(batch_prompts, batch_completions)]
+            full_tokens = self.tokenizer(
+                full_texts, 
+                return_tensors="pt",
+                padding=True,
+                truncation=True, 
+                max_length=1280
+            ).to(device)
 
-        for prompt, completion in zip(prompts, completions):
-            # Tokenize prompt and full text
-            prompt_tokens = self.tokenizer(prompt, return_tensors="pt", truncation=True, max_length=256)
-            full_text = prompt + completion
-            full_tokens = self.tokenizer(full_text, return_tensors="pt", truncation=True, max_length=1280)
-
-            device = next(model.parameters()).device
-            prompt_tokens = prompt_tokens.to(device)
-            full_tokens = full_tokens.to(device)
-
-            # Get model outputs - only use no_grad for reference model
+            # Get model outputs for entire batch
             if requires_grad:
                 with torch.autocast('cuda', dtype=torch.bfloat16):
                     outputs = model(
@@ -153,26 +167,35 @@ class GRPOTrainer:
                     )
             else:
                 with torch.no_grad(), torch.autocast('cuda', dtype=torch.bfloat16):
-                        outputs = model(
-                            input_ids=full_tokens.input_ids,
-                            attention_mask=full_tokens.attention_mask,
-                        )
+                    outputs = model(
+                        input_ids=full_tokens.input_ids,
+                        attention_mask=full_tokens.attention_mask,
+                    )
 
-            # Extract log probs for generated tokens only
-            prompt_len = prompt_tokens.input_ids.shape[1]
-            generated_logits = outputs.logits[0, prompt_len-1:-1]  # Shift by 1 for next token prediction
-            generated_tokens = full_tokens.input_ids[0, prompt_len:]
-
-            # Calculate log probs
-            token_log_probs = F.log_softmax(generated_logits, dim=-1)
-            selected_log_probs = token_log_probs.gather(1, generated_tokens.unsqueeze(1)).squeeze(1)
-
-            # Average log prob for the sequence
-            if requires_grad:
-                avg_log_prob = selected_log_probs.mean()  # Keep as tensor for gradients
-            else:
-                avg_log_prob = selected_log_probs.mean().item()  # Convert to scalar
-            log_probs.append(avg_log_prob)
+            # Process each item in batch
+            for j in range(len(batch_prompts)):
+                # Get actual lengths (handle padding)
+                if self.tokenizer.padding_side == "left":
+                    prompt_len = prompt_tokens.input_ids[j].shape[0]
+                else:
+                    prompt_len = int(prompt_tokens.attention_mask[j].sum().item())
+                    
+                full_len = int(full_tokens.attention_mask[j].sum().item())
+                
+                # Extract log probs for generated tokens only
+                generated_logits = outputs.logits[j, prompt_len-1:full_len-1]  # Shift by 1 for next token prediction
+                generated_tokens = full_tokens.input_ids[j, prompt_len:full_len]
+                
+                # Calculate log probs
+                token_log_probs = F.log_softmax(generated_logits, dim=-1)
+                selected_log_probs = token_log_probs.gather(1, generated_tokens.unsqueeze(1)).squeeze(1)
+                
+                # Average log prob for the sequence
+                if requires_grad:
+                    avg_log_prob = selected_log_probs.mean()  # Keep as tensor for gradients
+                else:
+                    avg_log_prob = selected_log_probs.mean().item()  # Convert to scalar
+                log_probs.append(avg_log_prob)
 
         if requires_grad:
             return torch.stack(log_probs)  # Stack tensors to maintain gradients
