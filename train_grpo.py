@@ -88,6 +88,7 @@ class GRPOTrainer:
             max_seq_length=2048,
             dtype=torch.bfloat16,
             load_in_4bit=True,
+            max_lora_rank=rank,
         )
         # Don't add LoRA to reference model - we want to compare against the base model
         FastLanguageModel.for_inference(self.ref_model)  # Freeze reference model
@@ -134,27 +135,27 @@ class GRPOTrainer:
         """Calculate actual log probabilities for completions given prompts - batched version"""
         device = next(model.parameters()).device
         log_probs = []
-        
+
         # Process in batches for efficiency using the configured batch_size
         for i in range(0, len(prompts), self.batch_size):
             batch_prompts = prompts[i:i+self.batch_size]
             batch_completions = completions[i:i+self.batch_size]
-            
+
             # Tokenize all prompts and full texts in batch
             prompt_tokens = self.tokenizer(
-                batch_prompts, 
-                return_tensors="pt", 
-                padding=True,
-                truncation=True, 
-                max_length=256
-            ).to(device)
-            
-            full_texts = [p + c for p, c in zip(batch_prompts, batch_completions)]
-            full_tokens = self.tokenizer(
-                full_texts, 
+                batch_prompts,
                 return_tensors="pt",
                 padding=True,
-                truncation=True, 
+                truncation=True,
+                max_length=256
+            ).to(device)
+
+            full_texts = [p + c for p, c in zip(batch_prompts, batch_completions)]
+            full_tokens = self.tokenizer(
+                full_texts,
+                return_tensors="pt",
+                padding=True,
+                truncation=True,
                 max_length=1280
             ).to(device)
 
@@ -179,17 +180,17 @@ class GRPOTrainer:
                     prompt_len = prompt_tokens.input_ids[j].shape[0]
                 else:
                     prompt_len = int(prompt_tokens.attention_mask[j].sum().item())
-                    
+
                 full_len = int(full_tokens.attention_mask[j].sum().item())
-                
+
                 # Extract log probs for generated tokens only
                 generated_logits = outputs.logits[j, prompt_len-1:full_len-1]  # Shift by 1 for next token prediction
                 generated_tokens = full_tokens.input_ids[j, prompt_len:full_len]
-                
+
                 # Calculate log probs
                 token_log_probs = F.log_softmax(generated_logits, dim=-1)
                 selected_log_probs = token_log_probs.gather(1, generated_tokens.unsqueeze(1)).squeeze(1)
-                
+
                 # Average log prob for the sequence
                 if requires_grad:
                     avg_log_prob = selected_log_probs.mean()  # Keep as tensor for gradients
