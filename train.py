@@ -62,12 +62,12 @@ class LoRAWeightManager:
                     in_features = self.hidden_size
                     out_features = self.hidden_size
 
-                # LoRA A: (rank, in_features), LoRA B: (out_features, rank)
+                # vLLM expects: lora_A: (in_features, rank), lora_B: (rank, out_features)
                 # vLLM expects .weight suffix
                 key_a = f"base_model.model.model.layers.{layer_idx}.self_attn.{module}.lora_A.weight"
                 key_b = f"base_model.model.model.layers.{layer_idx}.self_attn.{module}.lora_B.weight"
-                shapes[key_a] = (self.rank, in_features)
-                shapes[key_b] = (out_features, self.rank)
+                shapes[key_a] = (in_features, self.rank)  # (2048, 16)
+                shapes[key_b] = (self.rank, out_features)  # (16, 2048)
 
         return shapes
 
@@ -78,7 +78,8 @@ class LoRAWeightManager:
         for key, shape in self.param_shapes.items():
             if "lora_A" in key:
                 # Initialize A matrix with Kaiming uniform
-                w = np.random.randn(*shape) * np.sqrt(2.0 / shape[1])
+                # shape is (in_features, rank), so scale by input dimension
+                w = np.random.randn(*shape) * np.sqrt(2.0 / shape[0])
             else:  # lora_B
                 # Initialize B matrix to zeros
                 w = np.zeros(shape)
