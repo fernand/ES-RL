@@ -28,7 +28,6 @@ class GRPOTrainer:
         rank: int = 16,
         alpha: int = 32,
         max_epochs: int = 3,
-        eval_samples: int = 256,
         seed: int = 42,
         checkpoint_dir: str = "checkpoints_grpo",
         kl_coef: float = 0.01,
@@ -38,7 +37,6 @@ class GRPOTrainer:
         self.batch_size = batch_size
         self.learning_rate = learning_rate
         self.max_epochs = max_epochs
-        self.eval_samples = eval_samples
         self.seed = seed
         self.checkpoint_dir = checkpoint_dir
         self.kl_coef = kl_coef
@@ -102,8 +100,10 @@ class GRPOTrainer:
         )
 
         # Setup cosine annealing scheduler
-        # Total steps = (eval_samples / (batch_size / group_size)) * max_epochs
-        steps_per_epoch = max(1, eval_samples // max(1, batch_size // group_size))
+        # Total steps = (train_data_size / (batch_size / group_size)) * max_epochs
+        train_size = len(self.train_data)
+        prompts_per_batch = max(1, batch_size // group_size)
+        steps_per_epoch = max(1, train_size // prompts_per_batch)
         total_steps = steps_per_epoch * max_epochs
         self.scheduler = CosineAnnealingLR(
             self.optimizer,
@@ -111,6 +111,7 @@ class GRPOTrainer:
             eta_min=learning_rate * 0.1  # Min LR is 10% of initial LR
         )
         print(f"Cosine scheduler initialized: {steps_per_epoch} steps/epoch, {total_steps} total steps")
+        print(f"Training on full dataset: {train_size} samples")
 
         # Create directories
         os.makedirs(self.checkpoint_dir, exist_ok=True)
@@ -294,14 +295,10 @@ class GRPOTrainer:
         """Train for one epoch using GRPO"""
         print(f"\nEpoch {epoch + 1}/{self.max_epochs}")
 
-        # Sample training data
-        train_samples = min(self.eval_samples, len(self.train_data))
-        indices = np.random.choice(len(self.train_data), train_samples, replace=False)
-        batch = self.train_data.select(indices)
-
-        prompts = batch["prompt"]
-        targets = batch["target"]
-        nums = batch["nums"]
+        # Use full training data
+        prompts = self.train_data["prompt"]
+        targets = self.train_data["target"]
+        nums = self.train_data["nums"]
 
         # Process in mini-batches
         total_loss = 0
@@ -364,7 +361,7 @@ class GRPOTrainer:
         print(f"  Average policy loss: {avg_policy_loss:.4f}")
         print(f"  Average KL penalty: {avg_kl:.4f}")
         print(f"  Average reward: {avg_reward:.4f}")
-        print(f"  Total samples generated: {train_samples * self.group_size}")
+        print(f"  Total samples generated: {len(prompts) * self.group_size}")
         print(f"  Current learning rate: {self.scheduler.get_last_lr()[0]:.2e}")
 
         return avg_reward
@@ -488,7 +485,7 @@ def main():
                        help="Model name or path")
     parser.add_argument("--dataset_path", type=str, default="countdown_dataset",
                        help="Path to processed dataset")
-    parser.add_argument("--batch_size", type=int, default=32,
+    parser.add_argument("--batch_size", type=int, default=256,
                        help="Batch size for training")
     parser.add_argument("--learning_rate", type=float, default=5e-5,
                        help="Learning rate")
@@ -498,8 +495,6 @@ def main():
                        help="LoRA alpha scaling factor")
     parser.add_argument("--max_epochs", type=int, default=3,
                        help="Maximum number of training epochs")
-    parser.add_argument("--eval_samples", type=int, default=256,
-                       help="Number of samples to use for training per epoch")
     parser.add_argument("--kl_coef", type=float, default=0.04,
                        help="KL divergence coefficient")
     parser.add_argument("--group_size", type=int, default=8,
@@ -520,7 +515,6 @@ def main():
         rank=args.rank,
         alpha=args.alpha,
         max_epochs=args.max_epochs,
-        eval_samples=args.eval_samples,
         seed=args.seed,
         checkpoint_dir=args.checkpoint_dir,
         kl_coef=args.kl_coef,
