@@ -37,11 +37,13 @@ class LoRAWeightManager:
         ]
 
         # Get model config to determine layer dimensions
-        # Qwen2.5-3B has 36 layers, hidden_size=2048, num_heads=16
+        # Qwen2.5-3B has 36 layers, hidden_size=2048, num_heads=16, num_kv_heads=2 (GQA)
         self.num_layers = 36
         self.hidden_size = 2048
         self.num_heads = 16
+        self.num_kv_heads = 2  # Grouped Query Attention
         self.head_dim = self.hidden_size // self.num_heads
+        self.kv_dim = self.num_kv_heads * self.head_dim  # 2 * 128 = 256
 
         # Calculate total parameter count for LoRA
         self.param_shapes = self._get_param_shapes()
@@ -55,12 +57,14 @@ class LoRAWeightManager:
         for layer_idx in range(self.num_layers):
             for module in self.target_modules:
                 # Determine input/output dimensions based on module type
-                if module in ["q_proj", "k_proj", "v_proj"]:
-                    in_features = self.hidden_size
-                    out_features = self.hidden_size
+                in_features = self.hidden_size  # All modules have same input dim
+                
+                if module == "q_proj":
+                    out_features = self.hidden_size  # 2048
+                elif module in ["k_proj", "v_proj"]:
+                    out_features = self.kv_dim  # 256 (due to GQA)
                 elif module == "o_proj":
-                    in_features = self.hidden_size
-                    out_features = self.hidden_size
+                    out_features = self.hidden_size  # 2048
 
                 # vLLM expects TRANSPOSED shapes from standard LoRA!
                 # vLLM expects .weight suffix
