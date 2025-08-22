@@ -230,8 +230,9 @@ class LMMAESTrainer:
         """Evaluate a population of LoRA weights"""
         all_rewards = []
 
-        # Sample evaluation data
-        eval_indices = np.random.choice(len(self.train_data), self.eval_samples, replace=False)
+        # Sample evaluation data (ensure we don't sample more than available)
+        eval_samples = min(self.eval_samples, len(self.train_data))
+        eval_indices = np.random.choice(len(self.train_data), eval_samples, replace=False)
         eval_batch = self.train_data.select(eval_indices)
 
         # Process each member of the population
@@ -262,14 +263,16 @@ class LMMAESTrainer:
             for i in range(0, len(prompts), self.batch_size):
                 batch_prompts = prompts[i:i + self.batch_size]
 
-                # Tokenize inputs
                 inputs = self.tokenizer(
                     batch_prompts,
                     return_tensors="pt",
                     padding=True,
                     truncation=True,
-                    max_length=256
-                ).to(model.device)
+                    max_length=256  # Limit input prompt length
+                )
+                # Get device from model parameters
+                device = next(model.parameters()).device
+                inputs = inputs.to(device)
 
                 # Generate
                 with torch.no_grad():
@@ -313,8 +316,8 @@ class LMMAESTrainer:
         logger.info("Starting LM-MA-ES training")
 
         for generation in range(self.max_generations):
-            if generation >= self.max_generations or self.es.stop():
-                logger.info(f"Stopping: generation={generation}, max={self.max_generations}")
+            if self.es.stop():
+                logger.info(f"Stopping at generation {generation}: CMA-ES convergence criteria met")
                 break
 
             # Sample population
@@ -382,14 +385,17 @@ class LMMAESTrainer:
         for i in range(0, len(prompts), self.batch_size):
             batch_prompts = prompts[i:i + self.batch_size]
 
-            # Tokenize inputs
+            # Tokenize inputs (limit prompt to 256 tokens)
             inputs = self.tokenizer(
                 batch_prompts,
                 return_tensors="pt",
                 padding=True,
                 truncation=True,
-                max_length=2048
-            ).to(model.device)
+                max_length=256  # Limit input prompt length
+            )
+            # Get device from model parameters
+            device = next(model.parameters()).device
+            inputs = inputs.to(device)
 
             # Generate
             with torch.no_grad():
