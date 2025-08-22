@@ -16,7 +16,7 @@ class LMCMAES:
     def __init__(
         self,
         x0: np.ndarray,
-        sigma: float = 0.5,
+        sigma: float = 0.1,
         inopts: Optional[Dict[str, Any]] = None
     ):
         """

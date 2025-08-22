@@ -1,6 +1,7 @@
 # Adapted from https://github.com/philschmid/deep-learning-pytorch-huggingface/blob/main/training/mini-deepseek-r1-aha-grpo.ipynb
 import datasets
 import transformers
+from datasets import Features, Value, Sequence
 
 # Gemerate r1 prompt with a prefix for the model to already start with the thinking process
 def generate_r1_prompt(numbers, target, tokenizer):
@@ -16,7 +17,7 @@ def generate_r1_prompt(numbers, target, tokenizer):
         "role": "assistant",
         "content": "Let me solve this step by step.\n<think>"
     }]
-    return {"prompt": tokenizer.apply_chat_template(r1_prefix, tokenize=False, continue_final_message=True), "target": target}
+    return {"prompt": tokenizer.apply_chat_template(r1_prefix, tokenize=False, continue_final_message=True), "target": target, "nums": numbers}
 
 if __name__ == "__main__":
     dataset = datasets.load_dataset("Jiayi-Pan/Countdown-Tasks-3to4", split="train")
@@ -24,5 +25,16 @@ if __name__ == "__main__":
     tokenizer = transformers.AutoTokenizer.from_pretrained("Qwen/Qwen2.5-3B-Instruct")
 
     dataset = dataset.map(lambda x: generate_r1_prompt(x["nums"], x["target"], tokenizer))
+    
+    # Define proper features schema with Sequence instead of List
+    features = Features({
+        'target': Value('int64'),
+        'nums': Sequence(Value('int64')),
+        'prompt': Value('string')
+    })
+    
+    # Cast dataset to use the correct features
+    dataset = dataset.cast(features)
+    
     train_test_split = dataset.train_test_split(test_size=0.1)
     train_test_split.save_to_disk("countdown_dataset")

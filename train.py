@@ -3,19 +3,17 @@ import json
 import logging
 import shutil
 import os
+from typing import List, Dict, Tuple
 
 import datasets
 import numpy as np
 import torch
-from typing import List, Dict, Tuple
-from vllm import LLM, SamplingParams
-from vllm.lora.request import LoRARequest
+from unsloth import FastLanguageModel
 from tqdm import tqdm
 
 from reward import format_reward_func, equation_reward_func
 from lm_cma_es import LMCMAES
 
-# Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
@@ -29,6 +27,7 @@ class LoRAWeightManager:
         self.dtype = dtype
 
         # Define LoRA target modules for Qwen2.5 attention layers only
+        # Unsloth uses different naming conventions
         self.target_modules = [
             "q_proj",
             "k_proj",
@@ -66,11 +65,10 @@ class LoRAWeightManager:
                 elif module == "o_proj":
                     out_features = self.hidden_size  # 2048
 
-                # vLLM expects TRANSPOSED shapes from standard LoRA!
-                # vLLM expects .weight suffix
+                # Standard PEFT naming convention (without the .default suffix)
                 key_a = f"base_model.model.model.layers.{layer_idx}.self_attn.{module}.lora_A.weight"
                 key_b = f"base_model.model.model.layers.{layer_idx}.self_attn.{module}.lora_B.weight"
-                # Note: These are transposed from mathematical LoRA convention
+                # Standard LoRA shapes (not transposed like vLLM)
                 shapes[key_a] = (self.rank, in_features)  # (16, 2048)
                 shapes[key_b] = (out_features, self.rank)  # (2048, 16)
 
@@ -106,10 +104,10 @@ class LoRAWeightManager:
         return weights_dict
 
     def save_lora_adapter(self, weights_dict: Dict[str, torch.Tensor], save_path: str):
-        """Save LoRA adapter in format compatible with vLLM"""
+        """Save LoRA adapter in format compatible with PEFT/Unsloth"""
         os.makedirs(save_path, exist_ok=True)
 
-        # Save adapter config
+        # Save adapter config in PEFT format
         adapter_config = {
             "r": self.rank,
             "lora_alpha": self.alpha,
@@ -117,6 +115,8 @@ class LoRAWeightManager:
             "lora_dropout": 0.0,
             "base_model_name_or_path": self.model_name,
             "peft_type": "LORA",
+            "task_type": "CAUSAL_LM",
+            "bias": "none",
         }
 
         with open(os.path.join(save_path, "adapter_config.json"), "w") as f:
@@ -128,7 +128,7 @@ class LoRAWeightManager:
 
 
 class LMMAESTrainer:
-    """LM-MA-ES trainer for LoRA optimization with vLLM"""
+    """LM-MA-ES trainer for LoRA optimization with Unsloth"""
 
     def __init__(
         self,
@@ -168,25 +168,41 @@ class LMMAESTrainer:
         self.train_data = self.dataset["train"]
         self.eval_data = self.dataset["test"]
 
-        # Initialize vLLM with data parallel
-        logger.info("Initializing vLLM with tensor_parallel_size=2")
-        self.llm = LLM(
-            model=model_name,
-            quantization="gptq",
-            data_parallel_size=2,
-            enable_lora=True,
-            max_lora_rank=rank,
-            max_loras=population_size,  # Support all population members
-            trust_remote_code=True,
+        # Initialize Unsloth model
+        logger.info("Initializing Unsloth model")
+        self.base_model, self.tokenizer = FastLanguageModel.from_pretrained(
+            model_name=model_name,
+            max_seq_length=2048,
+            dtype=torch.bfloat16,
+            load_in_4bit=True,
         )
 
-        # Sampling parameters for generation
-        self.sampling_params = SamplingParams(
-            temperature=0.7,
-            top_p=0.9,
-            max_tokens=512,
-            stop=["</answer>"],
+        # Set up tokenizer
+        self.tokenizer.pad_token = self.tokenizer.eos_token
+        self.tokenizer.padding_side = "left"
+
+        # Generation parameters
+        self.generation_kwargs = {
+            "max_new_tokens": 1024,
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "do_sample": True,
+            "pad_token_id": self.tokenizer.pad_token_id,
+            "eos_token_id": self.tokenizer.eos_token_id,  # Will add stop tokens in generation
+        }
+
+        # Create PEFT model once for reuse
+        logger.info("Creating PEFT model for LoRA adaptation")
+        self.peft_model = FastLanguageModel.get_peft_model(
+            self.base_model,
+            r=rank,
+            target_modules=self.lora_manager.target_modules,
+            lora_alpha=alpha,
+            lora_dropout=0,
+            bias="none",
+            use_gradient_checkpointing=False,
         )
+        FastLanguageModel.for_inference(self.peft_model)
 
         # Initialize LM-CMA-ES
         initial_weights = self.lora_manager.init_weights()
@@ -223,12 +239,19 @@ class LMMAESTrainer:
             # Convert weights to LoRA dict
             lora_dict = self.lora_manager.vector_to_lora_dict(weights)
 
-            # Save temporary LoRA adapter
-            adapter_path = os.path.join(self.temp_dir, f"adapter_{idx}")
-            self.lora_manager.save_lora_adapter(lora_dict, adapter_path)
+            # Update the LoRA weights directly in the model
+            with torch.no_grad():
+                for name, param in self.peft_model.named_parameters():
+                    if "lora_" in name:
+                        # Build the expected key based on the parameter name
+                        # Remove 'default.' if present and ensure correct format
+                        clean_name = name.replace(".default", "")
+                        if clean_name in lora_dict:
+                            param.data.copy_(lora_dict[clean_name])
+                        elif name in lora_dict:
+                            param.data.copy_(lora_dict[name])
 
-            # Create LoRA request
-            lora_request = LoRARequest(f"adapter_{idx}", idx + 1, adapter_path)
+            model = self.peft_model
 
             # Generate completions in batches
             prompts = eval_batch["prompt"]
@@ -238,12 +261,31 @@ class LMMAESTrainer:
             completions = []
             for i in range(0, len(prompts), self.batch_size):
                 batch_prompts = prompts[i:i + self.batch_size]
-                outputs = self.llm.generate(
+
+                # Tokenize inputs
+                inputs = self.tokenizer(
                     batch_prompts,
-                    self.sampling_params,
-                    lora_request=lora_request
-                )
-                batch_completions = [output.outputs[0].text for output in outputs]
+                    return_tensors="pt",
+                    padding=True,
+                    truncation=True,
+                    max_length=256
+                ).to(model.device)
+
+                # Generate
+                with torch.no_grad():
+                    outputs = model.generate(
+                        **inputs,
+                        **self.generation_kwargs
+                    )
+
+                # Decode outputs (skip input tokens)
+                batch_completions = []
+                for j, output in enumerate(outputs):
+                    input_length = inputs.input_ids[j].shape[0]
+                    generated_tokens = output[input_length:]
+                    completion = self.tokenizer.decode(generated_tokens, skip_special_tokens=True)
+                    batch_completions.append(completion)
+
                 completions.extend(batch_completions)
 
             # Compute rewards
@@ -260,8 +302,9 @@ class LMMAESTrainer:
             avg_reward = np.mean(combined_rewards)
             all_rewards.append(avg_reward)
 
-            # Clean up temporary adapter
-            shutil.rmtree(adapter_path, ignore_errors=True)
+            # Clear GPU memory periodically
+            if idx % 10 == 0:
+                torch.cuda.empty_cache()
 
         return all_rewards
 
@@ -313,12 +356,17 @@ class LMMAESTrainer:
         # Convert weights to LoRA dict
         lora_dict = self.lora_manager.vector_to_lora_dict(weights)
 
-        # Save temporary LoRA adapter
-        adapter_path = os.path.join(self.temp_dir, "best_adapter")
-        self.lora_manager.save_lora_adapter(lora_dict, adapter_path)
+        # Update the LoRA weights directly in the reusable PEFT model
+        with torch.no_grad():
+            for name, param in self.peft_model.named_parameters():
+                if "lora_" in name:
+                    clean_name = name.replace(".default", "")
+                    if clean_name in lora_dict:
+                        param.data.copy_(lora_dict[clean_name])
+                    elif name in lora_dict:
+                        param.data.copy_(lora_dict[name])
 
-        # Create LoRA request
-        lora_request = LoRARequest("best_adapter", 1, adapter_path)
+        model = self.peft_model
 
         # Sample from test set
         test_samples = min(500, len(self.eval_data))
@@ -333,12 +381,31 @@ class LMMAESTrainer:
         completions = []
         for i in range(0, len(prompts), self.batch_size):
             batch_prompts = prompts[i:i + self.batch_size]
-            outputs = self.llm.generate(
+
+            # Tokenize inputs
+            inputs = self.tokenizer(
                 batch_prompts,
-                self.sampling_params,
-                lora_request=lora_request
-            )
-            batch_completions = [output.outputs[0].text for output in outputs]
+                return_tensors="pt",
+                padding=True,
+                truncation=True,
+                max_length=2048
+            ).to(model.device)
+
+            # Generate
+            with torch.no_grad():
+                outputs = model.generate(
+                    **inputs,
+                    **self.generation_kwargs
+                )
+
+            # Decode outputs (skip input tokens)
+            batch_completions = []
+            for j, output in enumerate(outputs):
+                input_length = inputs.input_ids[j].shape[0]
+                generated_tokens = output[input_length:]
+                completion = self.tokenizer.decode(generated_tokens, skip_special_tokens=True)
+                batch_completions.append(completion)
+
             completions.extend(batch_completions)
 
         # Compute rewards
@@ -348,8 +415,7 @@ class LMMAESTrainer:
         logger.info(f"Test set results - Format accuracy: {np.mean(format_rewards):.4f}, "
                    f"Equation accuracy: {np.mean(equation_rewards):.4f}")
 
-        # Clean up
-        shutil.rmtree(adapter_path, ignore_errors=True)
+        torch.cuda.empty_cache()
 
     def save_checkpoint(self, generation: int, weights: np.ndarray, reward: float):
         """Save checkpoint with LoRA weights"""
@@ -382,8 +448,8 @@ class LMMAESTrainer:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="LM-MA-ES training for LoRA optimization with vLLM")
-    parser.add_argument("--model_name", type=str, default="Qwen/Qwen2.5-3B-Instruct-GPTQ-Int4",
+    parser = argparse.ArgumentParser(description="LM-MA-ES training for LoRA optimization with Unsloth")
+    parser.add_argument("--model_name", type=str, default="unsloth/Qwen2.5-3B-Instruct-bnb-4bit",
                        help="Model name or path")
     parser.add_argument("--dataset_path", type=str, default="countdown_dataset",
                        help="Path to processed dataset")
@@ -393,7 +459,7 @@ def main():
                        help="LoRA rank")
     parser.add_argument("--alpha", type=int, default=32,
                        help="LoRA alpha scaling factor")
-    parser.add_argument("--batch_size", type=int, default=2,
+    parser.add_argument("--batch_size", type=int, default=256,
                        help="Batch size for inference")
     parser.add_argument("--max_generations", type=int, default=100,
                        help="Maximum number of CMA-ES generations")

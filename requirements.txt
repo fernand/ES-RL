@@ -1,4 +1,4 @@
 datasets
 tqdm
 safetensors
-vllm
+unsloth
