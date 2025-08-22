@@ -1,9 +1,0 @@
-We're going to implement an RL training script for `Qwen/Qwen2.5-3B-Instruct-GPTQ-Int4` but instead of using GRPO, we'll be using CMA-ES.
-The training dataset has already been split into train/eval and saved to disk by running `data.py`, including tokenization.
-We'll be using vllm to run model (since we don't need to do any gradient calculations). The parameters to optimize will be LoRA weights.
-We want to do LoRA on the attention weights only (no MLPs). To start we'll use a population size of 96
-vllm LoRA documentation: https://docs.vllm.ai/en/latest/features/lora.html
-
-I have two GPUs, so we can try data parallel size 2 for vLLM.
-Remember we want to use the int4 base model but the extra LoRA weights should be in BF16.
-The population size per ES update should be 92.
