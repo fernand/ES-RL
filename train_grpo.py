@@ -327,9 +327,18 @@ class GRPOTrainer:
             self.optimizer.zero_grad()
             loss = self.compute_grpo_loss(batch_prompts, completions, rewards, old_log_probs)
             self.optimizer.step()
+            
+            # Print step-wise statistics
+            step_mean_reward = rewards.mean().item()
+            step_max_reward = rewards.max().item()
+            step_min_reward = rewards.min().item()
+            print(f"  Step {i//prompts_per_batch + 1}: "
+                  f"Reward mean={step_mean_reward:.3f}, "
+                  f"max={step_max_reward:.3f}, min={step_min_reward:.3f}, "
+                  f"loss={loss:.4f}")
 
             total_loss += loss
-            total_reward += rewards.mean().item()
+            total_reward += step_mean_reward
             num_batches += 1
 
             # Clear GPU memory periodically
@@ -339,8 +348,10 @@ class GRPOTrainer:
         avg_loss = total_loss / max(num_batches, 1)
         avg_reward = total_reward / max(num_batches, 1)
 
-        print(f"Average loss: {avg_loss:.4f}")
-        print(f"Average reward: {avg_reward:.4f}")
+        print(f"\nEpoch {epoch + 1} Summary:")
+        print(f"  Average loss: {avg_loss:.4f}")
+        print(f"  Average reward: {avg_reward:.4f}")
+        print(f"  Total samples generated: {train_samples * self.group_size}")
 
         return avg_reward
 
