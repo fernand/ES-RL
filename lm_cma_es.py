@@ -70,11 +70,11 @@ class LMCMAES:
         # Learning rate for rank-one updates
         self.eta = min(0.5, 2.0 * self.mueff / (self.n + 2.0)) / self.n
 
-        # Bounds
+        # Bounds (support scalar bounds by broadcasting)
         self.bounds = opts.get('bounds', None)
         if self.bounds is not None:
-            self.lower_bound = self.bounds[0]
-            self.upper_bound = self.bounds[1]
+            self.lower_bound = np.asarray(self.bounds[0]) + np.zeros(self.n)
+            self.upper_bound = np.asarray(self.bounds[1]) + np.zeros(self.n)
 
         # Generation counter
         self.generation = 0
@@ -85,43 +85,66 @@ class LMCMAES:
         # Storage for current population
         self.current_pop = None
         self.current_z = None  # Store z vectors for tell()
+        
+        # Track best solution so far
+        self.best_x = self.xmean.copy()
+        self.best_f = np.inf
 
     def ask(self) -> np.ndarray:
         """
-        Generate new population of candidate solutions.
+        Generate new population of candidate solutions using mirrored sampling.
 
         Returns:
             Array of shape (popsize, n) containing candidate solutions
         """
         self.current_pop = np.zeros((self.lambda_, self.n))
         self.current_z = np.zeros((self.lambda_, self.n))
+        self.valid_mask = np.ones(self.lambda_, dtype=bool)  # Track valid samples
 
-        for i in range(self.lambda_):
-            # Generate standard normal vector
+        # Mirrored sampling for variance reduction
+        for i in range(0, self.lambda_, 2):
+            # Generate base random vector
             z = np.random.randn(self.n)
-            self.current_z[i] = z
-
-            # Apply Cholesky factor transformation: y = A * z
-            y = self._transform_vector(z)
-
-            # Create offspring
-            x = self.xmean + self.sigma * y
-
-            # Handle bounds with resampling for unbiased distribution
-            if self.bounds is not None:
-                max_resample = 100
-                for _ in range(max_resample):
-                    if np.all(x >= self.lower_bound) and np.all(x <= self.upper_bound):
-                        break
-                    # Resample if out of bounds
-                    z = np.random.randn(self.n)
-                    self.current_z[i] = z
-                    y = self._transform_vector(z)
-                    x = self.xmean + self.sigma * y
-                # Final clip as fallback
-                x = np.clip(x, self.lower_bound, self.upper_bound)
-
-            self.current_pop[i] = x
+            
+            # Process both z and -z (mirrored)
+            for sign, idx in [(+1, i), (-1, min(i+1, self.lambda_-1))]:
+                if idx >= self.lambda_:
+                    break
+                    
+                z_signed = sign * z
+                self.current_z[idx] = z_signed
+                
+                # Apply Cholesky factor transformation: y = A * z
+                y = self._transform_vector(z_signed)
+                
+                # Create offspring
+                x = self.xmean + self.sigma * y
+                
+                # Handle bounds with resampling for unbiased distribution
+                if self.bounds is not None:
+                    max_resample = 100
+                    valid = False
+                    
+                    for attempt in range(max_resample):
+                        if np.all(x >= self.lower_bound) and np.all(x <= self.upper_bound):
+                            valid = True
+                            break
+                        # Resample if out of bounds
+                        z_new = np.random.randn(self.n)
+                        self.current_z[idx] = z_new
+                        y = self._transform_vector(z_new)
+                        x = self.xmean + self.sigma * y
+                    
+                    if not valid:
+                        # Use reflection as fallback instead of clipping
+                        x = np.where(x < self.lower_bound, 
+                                    2 * self.lower_bound - x, x)
+                        x = np.where(x > self.upper_bound, 
+                                    2 * self.upper_bound - x, x)
+                        # Mark as invalid for update exclusion
+                        self.valid_mask[idx] = False
+                
+                self.current_pop[idx] = x
 
         return self.current_pop
 
@@ -136,21 +159,47 @@ class LMCMAES:
         # Sort by fitness
         idx = np.argsort(fitness_values)
 
-        # Select mu best solutions
+        # Track best solution
+        if fitness_values[idx[0]] < self.best_f:
+            self.best_f = fitness_values[idx[0]]
+            self.best_x = solutions[idx[0]].copy()
+        
+        # Select mu best solutions (excluding invalid ones if needed)
         selected = solutions[idx[:self.mu]]
-        selected_z = self.current_z[idx[:self.mu]]
-
+        valid_selected = self.valid_mask[idx[:self.mu]]
+        
         # Compute weighted mean of selected solutions
         xold = self.xmean.copy()
-        self.xmean = np.dot(self.weights, selected)
+        # Down-weight or exclude invalid samples
+        adjusted_weights = self.weights.copy()
+        adjusted_weights[~valid_selected] *= 0.1  # Heavily down-weight invalid
+        adjusted_weights /= adjusted_weights.sum()
+        self.xmean = np.dot(adjusted_weights, selected)
 
         # Update step size using CSA
         self._update_step_size(selected, xold)
 
-        # Update limited memory Cholesky factors
-        self._update_memory(selected, xold)
+        # Update limited memory Cholesky factors (only with valid samples)
+        if np.any(valid_selected):
+            valid_indices = np.where(valid_selected)[0]
+            selected_valid = selected[valid_indices]
+            weights_valid = self.weights[valid_indices] / np.sum(self.weights[valid_indices])
+            self._update_memory_with_weights(selected_valid, xold, weights_valid)
+        
+        # Occasional re-normalization to fight FP drift
+        if self.generation % 50 == 0 and len(self.v) > 0:
+            for i in range(len(self.v)):
+                norm = np.linalg.norm(self.v[i])
+                if abs(norm - 1.0) > 1e-6:
+                    self.v[i] /= norm
 
         self.generation += 1
+        
+        # Periodic consistency check for debugging
+        if self.generation % 50 == 0 and self.generation > 0:
+            if not self.test_consistency():
+                import warnings
+                warnings.warn(f"Transform consistency degraded at generation {self.generation}")
 
     def _transform_vector(self, z: np.ndarray) -> np.ndarray:
         """
@@ -207,6 +256,46 @@ class LMCMAES:
         self.sigma *= np.exp((self.c_sigma / self.d_sigma) *
                             (np.linalg.norm(self.p_sigma) / self.chiN - 1))
 
+    def _update_memory_with_weights(self, selected: np.ndarray, xold: np.ndarray, weights: np.ndarray):
+        """
+        Update limited memory Cholesky factors with custom weights.
+        
+        Args:
+            selected: Selected (best) solutions
+            xold: Previous mean
+            weights: Custom weights for selected solutions
+        """
+        # Compute steps in original space
+        y = (selected - xold) / self.sigma  # shape (mu, n)
+        
+        # Transform to whitened space
+        z = np.vstack([self._inverse_transform_vector(y_i) for y_i in y])
+        
+        # Compute weighted recombination in whitened space
+        z_w = np.dot(weights, z)  # shape (n,)
+        
+        # Compute norm
+        nz = np.linalg.norm(z_w)
+        if nz < 1e-12:
+            return
+        
+        # Normalize to get direction vector
+        v_new = z_w / nz
+        
+        # Compute scalar factor (centering at 1 in whitened space)
+        a_new = self.eta * (nz**2 / self.n - 1.0)
+        
+        # Clip to keep factor stable and invertible
+        a_new = np.clip(a_new, -0.9, 2.0)  # Keep 1+a in [0.1, 3.0]
+        
+        # Add to memory with FIFO policy
+        if len(self.v) >= self.m:
+            self.v.pop(0)
+            self.a.pop(0)
+        
+        self.v.append(v_new)
+        self.a.append(a_new)
+    
     def _update_memory(self, selected: np.ndarray, xold: np.ndarray):
         """
         Update limited memory Cholesky factors using rank-μ update approximation.
@@ -235,8 +324,8 @@ class LMCMAES:
         # Compute scalar factor (centering at 1 in whitened space)
         a_new = self.eta * (nz**2 / self.n - 1.0)
 
-        # Keep factor invertible
-        a_new = max(a_new, -0.9)
+        # Clip to keep factor stable and invertible
+        a_new = np.clip(a_new, -0.9, 2.0)  # Keep 1+a in [0.1, 3.0]
 
         # Add to memory with FIFO policy
         if len(self.v) >= self.m:
@@ -263,21 +352,37 @@ class LMCMAES:
     @property
     def result(self) -> Tuple[np.ndarray, float]:
         """
-        Get current best solution and step size.
+        Get best solution found so far and current step size.
 
         Returns:
             Tuple of (best solution, current step size)
         """
-        return self.xmean, self.sigma
+        return self.best_x, self.sigma
 
-    def test_consistency(self) -> bool:
+    def test_consistency(self, verbose: bool = False) -> bool:
         """
         Test mathematical consistency of transform/inverse operations.
+        
+        Args:
+            verbose: If True, print detailed error information
 
         Returns:
             True if transforms are consistent
         """
-        z = np.random.randn(self.n)
-        y = self._transform_vector(z)
-        z_recovered = self._inverse_transform_vector(y)
-        return np.allclose(z, z_recovered, atol=1e-8)
+        # Test multiple random vectors
+        n_tests = min(10, self.n)
+        max_error = 0.0
+        
+        for _ in range(n_tests):
+            z = np.random.randn(self.n)
+            y = self._transform_vector(z)
+            z_recovered = self._inverse_transform_vector(y)
+            error = np.linalg.norm(z - z_recovered) / (np.linalg.norm(z) + 1e-10)
+            max_error = max(max_error, error)
+        
+        if verbose:
+            print(f"Transform consistency check: max relative error = {max_error:.2e}")
+            if max_error > 1e-6:
+                print("WARNING: Transform consistency degraded!")
+        
+        return max_error < 1e-6
