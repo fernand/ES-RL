@@ -81,7 +81,7 @@ class GRPOTrainer:
         self.tokenizer.pad_token = self.tokenizer.eos_token
         self.tokenizer.padding_side = "left"
 
-        # Create reference model (frozen copy for KL divergence)
+        # Create reference model (frozen base model without LoRA for KL divergence)
         print("Creating reference model for KL divergence")
         self.ref_model, _ = FastLanguageModel.from_pretrained(
             model_name=model_name,
@@ -89,16 +89,7 @@ class GRPOTrainer:
             dtype=torch.bfloat16,
             load_in_4bit=True,
         )
-        self.ref_model = FastLanguageModel.get_peft_model(
-            self.ref_model,
-            r=rank,
-            target_modules=["q_proj", "k_proj", "v_proj", "o_proj"],
-            lora_alpha=alpha,
-            lora_dropout=0,
-            bias="none",
-            use_gradient_checkpointing=False,
-            random_state=seed,
-        )
+        # Don't add LoRA to reference model - we want to compare against the base model
         FastLanguageModel.for_inference(self.ref_model)  # Freeze reference model
 
         # Setup optimizer
