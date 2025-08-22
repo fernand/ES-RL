@@ -339,10 +339,6 @@ class GRPOTrainer:
             total_reward += step_mean_reward
             num_batches += 1
 
-            # Clear GPU memory periodically
-            if i % 10 == 0:
-                torch.cuda.empty_cache()
-
         avg_loss = total_loss / max(num_batches, 1)
         avg_policy_loss = total_policy_loss / max(num_batches, 1)
         avg_kl = total_kl / max(num_batches, 1)
