@@ -63,8 +63,9 @@ class LoRAWeightManager:
                     out_features = self.hidden_size
 
                 # LoRA A: (rank, in_features), LoRA B: (out_features, rank)
-                key_a = f"model.layers.{layer_idx}.self_attn.{module}.lora_A"
-                key_b = f"model.layers.{layer_idx}.self_attn.{module}.lora_B"
+                # vLLM expects .weight suffix
+                key_a = f"base_model.model.model.layers.{layer_idx}.self_attn.{module}.lora_A.weight"
+                key_b = f"base_model.model.model.layers.{layer_idx}.self_attn.{module}.lora_B.weight"
                 shapes[key_a] = (self.rank, in_features)
                 shapes[key_b] = (out_features, self.rank)
 
