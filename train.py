@@ -58,7 +58,7 @@ class LoRAWeightManager:
             for module in self.target_modules:
                 # Determine input/output dimensions based on module type
                 in_features = self.hidden_size  # All modules have same input dim
-                
+
                 if module == "q_proj":
                     out_features = self.hidden_size  # 2048
                 elif module in ["k_proj", "v_proj"]:
@@ -71,7 +71,7 @@ class LoRAWeightManager:
                 key_a = f"base_model.model.model.layers.{layer_idx}.self_attn.{module}.lora_A.weight"
                 key_b = f"base_model.model.model.layers.{layer_idx}.self_attn.{module}.lora_B.weight"
                 # Note: These are transposed from mathematical LoRA convention
-                shapes[key_a] = (self.rank, in_features)  # (16, 2048) 
+                shapes[key_a] = (self.rank, in_features)  # (16, 2048)
                 shapes[key_b] = (out_features, self.rank)  # (2048, 16)
 
         return shapes
@@ -178,7 +178,6 @@ class LMMAESTrainer:
             max_lora_rank=rank,
             max_loras=population_size,  # Support all population members
             trust_remote_code=True,
-            enforce_eager=True,
         )
 
         # Sampling parameters for generation
@@ -394,7 +393,7 @@ def main():
                        help="LoRA rank")
     parser.add_argument("--alpha", type=int, default=32,
                        help="LoRA alpha scaling factor")
-    parser.add_argument("--batch_size", type=int, default=32,
+    parser.add_argument("--batch_size", type=int, default=2,
                        help="Batch size for inference")
     parser.add_argument("--max_generations", type=int, default=100,
                        help="Maximum number of CMA-ES generations")
