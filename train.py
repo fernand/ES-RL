@@ -1,6 +1,5 @@
 import argparse
 import json
-import logging
 import shutil
 import os
 from typing import List, Dict, Tuple
@@ -13,9 +12,6 @@ from tqdm import tqdm
 
 from reward import format_reward_func, equation_reward_func
 from lm_cma_es import LMCMAES
-
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-logger = logging.getLogger(__name__)
 
 class LoRAWeightManager:
     """Manages LoRA weights for CMA-ES optimization"""
@@ -47,7 +43,7 @@ class LoRAWeightManager:
         # Calculate total parameter count for LoRA
         self.param_shapes = self._get_param_shapes()
         self.total_params = sum(np.prod(shape) for shape in self.param_shapes.values())
-        logger.info(f"Total LoRA parameters: {self.total_params:,}")
+        print(f"Total LoRA parameters: {self.total_params:,}")
 
     def _get_param_shapes(self) -> Dict[str, Tuple[int, ...]]:
         """Get shapes for all LoRA parameters"""
@@ -163,13 +159,13 @@ class LMMAESTrainer:
         self.lora_manager = LoRAWeightManager(model_name, rank=rank, alpha=alpha)
 
         # Load dataset
-        logger.info(f"Loading dataset from {dataset_path}")
+        print(f"Loading dataset from {dataset_path}")
         self.dataset = datasets.load_from_disk(dataset_path)
         self.train_data = self.dataset["train"]
         self.eval_data = self.dataset["test"]
 
         # Initialize Unsloth model
-        logger.info("Initializing Unsloth model")
+        print("Initializing Unsloth model")
         self.base_model, self.tokenizer = FastLanguageModel.from_pretrained(
             model_name=model_name,
             max_seq_length=2048,
@@ -192,7 +188,7 @@ class LMMAESTrainer:
         }
 
         # Create PEFT model once for reuse
-        logger.info("Creating PEFT model for LoRA adaptation")
+        print("Creating PEFT model for LoRA adaptation")
         self.peft_model = FastLanguageModel.get_peft_model(
             self.base_model,
             r=rank,
@@ -311,18 +307,18 @@ class LMMAESTrainer:
 
     def train(self):
         """Main training loop"""
-        logger.info("Starting LM-MA-ES training")
+        print("Starting LM-MA-ES training")
 
         for generation in range(self.max_generations):
             if self.es.stop():
-                logger.info(f"Stopping at generation {generation}: CMA-ES convergence criteria met")
+                print(f"Stopping at generation {generation}: CMA-ES convergence criteria met")
                 break
 
             # Sample population
             population = self.es.ask()
 
             # Evaluate population
-            logger.info(f"Generation {generation + 1}/{self.max_generations}")
+            print(f"\nGeneration {generation + 1}/{self.max_generations}")
             rewards = self.evaluate_population(population)
 
             # Negate rewards for minimization (LM-MA-ES minimizes by default)
@@ -341,10 +337,11 @@ class LMMAESTrainer:
                 self.save_checkpoint(generation, self.best_weights, self.best_reward)
 
             # Log statistics
-            logger.info(f"Reward stats - Mean: {np.mean(rewards):.4f}, "
-                       f"Max: {np.max(rewards):.4f}, Min: {np.min(rewards):.4f}, "
-                       f"Std: {np.std(rewards):.4f}")
-            logger.info(f"Best reward so far: {self.best_reward:.4f}")
+            print(f"Reward stats - Mean: {np.mean(rewards):.4f}, "
+                  f"Max: {np.max(rewards):.4f}, Min: {np.min(rewards):.4f}, "
+                  f"Std: {np.std(rewards):.4f}")
+            print(f"Best reward this generation: {rewards[best_idx]:.4f}")
+            print(f"Best reward overall: {self.best_reward:.4f}")
 
             # Periodic evaluation on test set
             if (generation + 1) % 10 == 0:
@@ -352,7 +349,7 @@ class LMMAESTrainer:
 
     def evaluate_on_test_set(self, weights: np.ndarray):
         """Evaluate best weights on test set"""
-        logger.info("Evaluating on test set...")
+        print("Evaluating on test set...")
 
         # Convert weights to LoRA dict
         lora_dict = self.lora_manager.vector_to_lora_dict(weights)
@@ -416,8 +413,8 @@ class LMMAESTrainer:
         format_rewards = format_reward_func(completions, targets)
         equation_rewards = equation_reward_func(completions, targets, nums)
 
-        logger.info(f"Test set results - Format accuracy: {np.mean(format_rewards):.4f}, "
-                   f"Equation accuracy: {np.mean(equation_rewards):.4f}")
+        print(f"Test set results - Format accuracy: {np.mean(format_rewards):.4f}, "
+              f"Equation accuracy: {np.mean(equation_rewards):.4f}")
 
         torch.cuda.empty_cache()
 
@@ -442,7 +439,7 @@ class LMMAESTrainer:
         with open(os.path.join(checkpoint_path, "metadata.json"), "w") as f:
             json.dump(metadata, f, indent=2)
 
-        logger.info(f"Saved checkpoint to {checkpoint_path}")
+        print(f"Saved checkpoint to {checkpoint_path}")
 
         # Also save as "best" checkpoint
         best_path = os.path.join(self.checkpoint_dir, "best")
@@ -457,7 +454,7 @@ def main():
                        help="Model name or path")
     parser.add_argument("--dataset_path", type=str, default="countdown_dataset",
                        help="Path to processed dataset")
-    parser.add_argument("--population_size", type=int, default=92,
+    parser.add_argument("--population_size", type=int, default=4,
                        help="CMA-ES population size")
     parser.add_argument("--rank", type=int, default=16,
                        help="LoRA rank")
