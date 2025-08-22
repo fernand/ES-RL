@@ -139,7 +139,7 @@ class GRPOTrainer:
 
         return torch.tensor(combined_rewards, dtype=torch.float32)
 
-    def get_log_probs(self, model, prompts: List[str], completions: List[str]) -> torch.Tensor:
+    def get_log_probs(self, model, prompts: List[str], completions: List[str], requires_grad: bool = False) -> torch.Tensor:
         """Calculate actual log probabilities for completions given prompts"""
         log_probs = []
 
@@ -153,12 +153,18 @@ class GRPOTrainer:
             prompt_tokens = prompt_tokens.to(device)
             full_tokens = full_tokens.to(device)
 
-            # Get model outputs
-            with torch.no_grad():
+            # Get model outputs - only use no_grad for reference model
+            if requires_grad:
                 outputs = model(
                     input_ids=full_tokens.input_ids,
                     attention_mask=full_tokens.attention_mask,
                 )
+            else:
+                with torch.no_grad():
+                    outputs = model(
+                        input_ids=full_tokens.input_ids,
+                        attention_mask=full_tokens.attention_mask,
+                    )
 
             # Extract log probs for generated tokens only
             prompt_len = prompt_tokens.input_ids.shape[1]
@@ -170,10 +176,16 @@ class GRPOTrainer:
             selected_log_probs = token_log_probs.gather(1, generated_tokens.unsqueeze(1)).squeeze(1)
 
             # Average log prob for the sequence
-            avg_log_prob = selected_log_probs.mean().item()
+            if requires_grad:
+                avg_log_prob = selected_log_probs.mean()  # Keep as tensor for gradients
+            else:
+                avg_log_prob = selected_log_probs.mean().item()  # Convert to scalar
             log_probs.append(avg_log_prob)
 
-        return torch.tensor(log_probs, dtype=torch.float32)
+        if requires_grad:
+            return torch.stack(log_probs)  # Stack tensors to maintain gradients
+        else:
+            return torch.tensor(log_probs, dtype=torch.float32)
 
     def generate_samples(self, prompts: List[str], num_samples: int = 1) -> Tuple[List[str], List[str]]:
         """Generate multiple samples per prompt"""
@@ -227,12 +239,16 @@ class GRPOTrainer:
         """Compute GRPO loss with group-relative rewards"""
         self.model.train()
 
-        # Get current policy log probs
-        current_log_probs = self.get_log_probs(self.model, prompts, completions)
+        # Get current policy log probs (with gradients)
+        current_log_probs = self.get_log_probs(self.model, prompts, completions, requires_grad=True)
 
-        # Get reference policy log probs (for KL penalty)
-        with torch.no_grad():
-            ref_log_probs = self.get_log_probs(self.ref_model, prompts, completions)
+        # Get reference policy log probs (without gradients)
+        ref_log_probs = self.get_log_probs(self.ref_model, prompts, completions, requires_grad=False)
+        
+        # Move tensors to the same device as the model
+        device = next(self.model.parameters()).device
+        rewards = rewards.to(device)
+        ref_log_probs = ref_log_probs.to(device)
 
         # Reshape for group processing
         num_groups = len(prompts) // self.group_size
