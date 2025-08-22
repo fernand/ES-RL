@@ -1,3 +1,5 @@
 cma
 datasets
+tqdm
+safetensors
 vllm
