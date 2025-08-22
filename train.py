@@ -305,9 +305,7 @@ class LMMAESTrainer:
             avg_reward = np.mean(combined_rewards)
             all_rewards.append(avg_reward)
 
-            # Clear GPU memory periodically
-            if idx % 10 == 0:
-                torch.cuda.empty_cache()
+            torch.cuda.empty_cache()
 
         return all_rewards
 
@@ -465,11 +463,11 @@ def main():
                        help="LoRA rank")
     parser.add_argument("--alpha", type=int, default=32,
                        help="LoRA alpha scaling factor")
-    parser.add_argument("--batch_size", type=int, default=256,
+    parser.add_argument("--batch_size", type=int, default=16,
                        help="Batch size for inference")
     parser.add_argument("--max_generations", type=int, default=100,
                        help="Maximum number of CMA-ES generations")
-    parser.add_argument("--eval_samples", type=int, default=256,
+    parser.add_argument("--eval_samples", type=int, default=16,
                        help="Number of samples to evaluate per population member")
     parser.add_argument("--sigma", type=float, default=0.1,
                        help="Initial sigma for CMA-ES")
