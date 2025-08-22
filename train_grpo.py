@@ -155,16 +155,17 @@ class GRPOTrainer:
 
             # Get model outputs - only use no_grad for reference model
             if requires_grad:
-                outputs = model(
-                    input_ids=full_tokens.input_ids,
-                    attention_mask=full_tokens.attention_mask,
-                )
-            else:
-                with torch.no_grad():
+                with torch.autocast('cuda', dtype=torch.bfloat16):
                     outputs = model(
                         input_ids=full_tokens.input_ids,
                         attention_mask=full_tokens.attention_mask,
                     )
+            else:
+                with torch.no_grad(), torch.autocast('cuda', dtype=torch.bfloat16):
+                        outputs = model(
+                            input_ids=full_tokens.input_ids,
+                            attention_mask=full_tokens.attention_mask,
+                        )
 
             # Extract log probs for generated tokens only
             prompt_len = prompt_tokens.input_ids.shape[1]
@@ -210,15 +211,16 @@ class GRPOTrainer:
                 inputs = inputs.to(device)
 
                 # Generate with sampling
-                outputs = self.model.generate(
-                    **inputs,
-                    max_new_tokens=1024,
-                    temperature=0.7,
-                    top_p=0.9,
-                    do_sample=True,
-                    pad_token_id=self.tokenizer.pad_token_id,
-                    eos_token_id=self.tokenizer.eos_token_id,
-                )
+                with torch.autocast('cuda', dtype=torch.bfloat16):
+                    outputs = self.model.generate(
+                        **inputs,
+                        max_new_tokens=1024,
+                        temperature=0.7,
+                        top_p=0.9,
+                        do_sample=True,
+                        pad_token_id=self.tokenizer.pad_token_id,
+                        eos_token_id=self.tokenizer.eos_token_id,
+                    )
 
                 # Extract completions
                 for i in range(num_samples):
@@ -244,7 +246,7 @@ class GRPOTrainer:
 
         # Get reference policy log probs (without gradients)
         ref_log_probs = self.get_log_probs(self.ref_model, prompts, completions, requires_grad=False)
-        
+
         # Move tensors to the same device as the model
         device = next(self.model.parameters()).device
         rewards = rewards.to(device)
@@ -388,15 +390,16 @@ class GRPOTrainer:
                 inputs = inputs.to(device)
 
                 # Generate
-                outputs = self.model.generate(
-                    **inputs,
-                    max_new_tokens=1024,
-                    temperature=0.7,
-                    top_p=0.9,
-                    do_sample=True,
-                    pad_token_id=self.tokenizer.pad_token_id,
-                    eos_token_id=self.tokenizer.eos_token_id,
-                )
+                with torch.autocast('cuda', dtype=torch.bfloat16):
+                    outputs = self.model.generate(
+                        **inputs,
+                        max_new_tokens=1024,
+                        temperature=0.7,
+                        top_p=0.9,
+                        do_sample=True,
+                        pad_token_id=self.tokenizer.pad_token_id,
+                        eos_token_id=self.tokenizer.eos_token_id,
+                    )
 
                 # Extract completions
                 for j, output in enumerate(outputs):
