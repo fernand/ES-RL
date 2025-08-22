@@ -27,7 +27,7 @@ class GRPOTrainer:
         learning_rate: float = 5e-5,
         rank: int = 16,
         alpha: int = 32,
-        max_epochs: int = 3,
+        max_epochs: int = 1,
         seed: int = 42,
         checkpoint_dir: str = "checkpoints_grpo",
         kl_coef: float = 0.01,
@@ -493,7 +493,7 @@ def main():
                        help="LoRA rank")
     parser.add_argument("--alpha", type=int, default=32,
                        help="LoRA alpha scaling factor")
-    parser.add_argument("--max_epochs", type=int, default=3,
+    parser.add_argument("--max_epochs", type=int, default=1,
                        help="Maximum number of training epochs")
     parser.add_argument("--kl_coef", type=float, default=0.04,
                        help="KL divergence coefficient")
