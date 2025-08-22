@@ -285,11 +285,9 @@ class LMCMAES:
         # Normalize to get direction vector
         v_new = z_w / nz
 
-        mueff_w = 1.0 / np.sum(weights**2)
-        target = self.n / mueff_w
-
         # Compute scalar factor (centering at 1 in whitened space)
-        a_new = self.eta * ( (nz**2) / target - 1.0 )
+        mueff_w = 1.0 / np.sum(weights**2)
+        a_new = self.eta * ( (nz**2) / (self.n / mueff_w) - 1.0 )
 
         # Clip to keep factor stable and invertible
         a_new = np.clip(a_new, -0.9, 2.0)  # Keep 1+a in [0.1, 3.0]
@@ -328,7 +326,7 @@ class LMCMAES:
         v_new = z_w / nz
 
         # Compute scalar factor (centering at 1 in whitened space)
-        a_new = self.eta * (nz**2 / self.n - 1.0)
+        a_new = self.eta * ((nz**2) / (self.n / self.mueff) - 1.0)
 
         # Clip to keep factor stable and invertible
         a_new = np.clip(a_new, -0.9, 2.0)  # Keep 1+a in [0.1, 3.0]
