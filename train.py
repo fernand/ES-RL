@@ -4,7 +4,6 @@ import logging
 import shutil
 import os
 
-import cma
 import datasets
 import numpy as np
 import torch
@@ -14,6 +13,7 @@ from vllm.lora.request import LoRARequest
 from tqdm import tqdm
 
 from reward import format_reward_func, equation_reward_func
+from lm_cma_es import LMCMAES
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -171,6 +171,7 @@ class LMMAESTrainer:
             max_lora_rank=rank,
             max_loras=population_size,  # Support all population members
             trust_remote_code=True,
+            enforce_eager=True,
         )
 
         # Sampling parameters for generation
@@ -181,19 +182,17 @@ class LMMAESTrainer:
             stop=["</answer>"],
         )
 
-        # Initialize LM-MA-ES
+        # Initialize LM-CMA-ES
         initial_weights = self.lora_manager.init_weights()
-        # Use LM-MA-ES for better performance on high-dimensional problems
-        self.es = cma.purecma.CMAES(
+        # Use our custom LM-CMA-ES for better performance on high-dimensional problems
+        self.es = LMCMAES(
             initial_weights,
             self.sigma,
             inopts={
                 'popsize': self.population_size,
                 'seed': self.seed,
                 'bounds': [-5, 5],  # Bounded optimization for stability
-                'CMA_memory_const': 0.7,  # Limited memory constant (0.7 is good for high-dim)
-                'verb_disp': 100,
-                'verb_log': 1,
+                'memory_limit': int(4 + 3 * np.log(len(initial_weights))),  # Limited memory budget
             }
         )
 
@@ -265,8 +264,8 @@ class LMMAESTrainer:
         logger.info("Starting LM-MA-ES training")
 
         for generation in range(self.max_generations):
-            if generation >= self.max_generations:
-                logger.info("Reached maximum generations")
+            if generation >= self.max_generations or self.es.stop():
+                logger.info(f"Stopping: generation={generation}, max={self.max_generations}")
                 break
 
             # Sample population
